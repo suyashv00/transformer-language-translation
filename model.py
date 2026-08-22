@@ -131,7 +131,7 @@ class EncoderBlock(nn.Module):
 
     def forward(self, x, src_mask):
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))
-        x = self.residual_connections[1](x, lambda x: self.feed_forward_block)
+        x = self.residual_connections[1](x, self.feed_forward_block)
         return x
 
 class Encoder(nn.Module):
@@ -158,7 +158,7 @@ class DecoderBlock(nn.Module):
     def forward(self, x, encoder_output, src_mask, tgt_mask):
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, tgt_mask))
         x = self.residual_connections[1](x, lambda x: self.cross_attention_block(x, encoder_output, encoder_output, src_mask))
-        x = self.residual_connections[2](x, lambda x: self.feed_forward_block)
+        x = self.residual_connections[2](x, self.feed_forward_block)
         return x
     
 class Decoder(nn.Module):
@@ -201,7 +201,7 @@ class Transformer(nn.Module):
         src = self.src_pos(src)
         return self.encoder(src, src_mask)
     
-    def decode(self, encoder_output, src_mask, tgt_mask):
+    def decode(self, encoder_output, src_mask, tgt, tgt_mask):
         tgt = self.tgt_embed(tgt)
         tgt = self.tgt_pos(tgt)
         return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
@@ -214,7 +214,7 @@ def build_transformer(src_vocab_size: int, tgt_vocab_size: int, src_seq_len: int
     
     # Create the embedding layers
     src_embed = InputEmbeddings(d_model, src_vocab_size)
-    tgt_embed = InputEmbeddings(d_model, src_vocab_size)
+    tgt_embed = InputEmbeddings(d_model, tgt_vocab_size)
 
     # Create the positional encoding layers
     src_pos = PositionalEncoding(d_model, src_seq_len, dropout)

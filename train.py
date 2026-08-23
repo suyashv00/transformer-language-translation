@@ -21,6 +21,19 @@ def get_all_sentences(ds, lang):
     for item in ds:
         yield item[lang]
 
+class ModelWithLoss(nn.Module):
+    """Wraps forward + loss so DataParallel gathers a per-GPU scalar instead of the full (B, Seq_Len, Vocab) logits onto GPU 0."""
+    def __init__(self, model, loss_fn, vocab_size):
+        super().__init__()
+        self.model = model
+        self.loss_fn = loss_fn
+        self.vocab_size = vocab_size
+
+    def forward(self, src, src_mask, tgt, tgt_mask, label):
+        proj_output = self.model(src, src_mask, tgt, tgt_mask)
+        loss = self.loss_fn(proj_output.view(-1, self.vocab_size), label.view(-1))
+        return loss.unsqueeze(0)
+
 def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
     sos_idx = tokenizer_tgt.token_to_id('[SOS]')
     eos_idx = tokenizer_tgt.token_to_id('[EOS]')
@@ -143,12 +156,11 @@ def train_model(config):
 
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
     raw_model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
-    model = nn.DataParallel(raw_model) if torch.cuda.device_count() > 1 else raw_model
 
     # Tensorboard
     writer = SummaryWriter(config['experiment_name'])
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
+    optimizer = torch.optim.Adam(raw_model.parameters(), lr=config['lr'], eps=1e-9)
 
     initial_epoch = 0
     global_step = 0
@@ -166,6 +178,9 @@ def train_model(config):
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
+    model_with_loss = ModelWithLoss(raw_model, loss_fn, tokenizer_tgt.get_vocab_size())
+    model = nn.DataParallel(model_with_loss) if torch.cuda.device_count() > 1 else model_with_loss
+
     for epoch in range(initial_epoch, config['num_epochs']):
         
         batch_iterator = tqdm(train_dataloader, desc=f'Processing epoch {epoch:02d}')
@@ -178,13 +193,11 @@ def train_model(config):
             encoder_mask = batch['encoder_mask'].to(device) # (B, 1, 1, Seq_Len)
             decoder_mask = batch['decoder_mask'].to(device) # (B, 1, Seq_Len, Seq_Len)
 
-            # Run the tensors through the transformer
-            proj_output = model(encoder_input, encoder_mask, decoder_input, decoder_mask) # (B, Seq_Len, tgt_vocab_size)
-
             label = batch['label'].to(device) # (B, Seq_Len)
 
-            # (B, Seq_Len, tgt_vocab_size) -> (B * Seq_Len, tgt_vocab_size)
-            loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
+            # Run the tensors through the transformer and compute loss per-GPU, so DataParallel
+            # only gathers a small scalar back to GPU 0 instead of the full (B, Seq_Len, Vocab) logits.
+            loss = model(encoder_input, encoder_mask, decoder_input, decoder_mask, label).mean()
             batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
 
             # Log the loss

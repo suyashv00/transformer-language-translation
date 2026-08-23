@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader, random_split
 
 from dataset import BilingualDataset, causal_mask
 from model import build_transformer
-from config import get_weights_file_path, get_config
+from config import get_weights_file_path, latest_weights_file_path, get_config
 
 from datasets import load_dataset
 from tokenizers import Tokenizer
@@ -125,8 +125,8 @@ def get_ds(config):
     print(f"Max length of source sentence : {max_len_src}")
     print(f"Max length of target sentence : {max_len_src}") 
 
-    train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
-    val_dataloader = DataLoader(val_ds, 1, shuffle=True)
+    train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True, num_workers=2, pin_memory=True)
+    val_dataloader = DataLoader(val_ds, 1, shuffle=True, num_workers=2, pin_memory=True)
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
@@ -142,7 +142,8 @@ def train_model(config):
     Path(config['model_folder']).mkdir(parents=True, exist_ok=True)
 
     train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
-    model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+    raw_model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+    model = nn.DataParallel(raw_model) if torch.cuda.device_count() > 1 else raw_model
 
     # Tensorboard
     writer = SummaryWriter(config['experiment_name'])
@@ -152,12 +153,16 @@ def train_model(config):
     initial_epoch = 0
     global_step = 0
     if config['preload']:
-        model_filename = get_weights_file_path(config, config['preload'])
-        print('Preloading model: ', model_filename)
-        state = torch.load(model_filename)
-        initial_epoch = state['epoch'] + 1
-        optimizer.load_state_dict(state['optimizer_state_dict'])
-        global_step = state['global_step']
+        model_filename = latest_weights_file_path(config) if config['preload'] == 'latest' else get_weights_file_path(config, config['preload'])
+        if model_filename:
+            print('Preloading model: ', model_filename)
+            state = torch.load(model_filename)
+            initial_epoch = state['epoch'] + 1 if state.get('epoch_complete', True) else state['epoch']
+            raw_model.load_state_dict(state['model_state_dict'])
+            optimizer.load_state_dict(state['optimizer_state_dict'])
+            global_step = state['global_step']
+        else:
+            print('No checkpoint found, starting fresh')
 
     loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
@@ -174,9 +179,7 @@ def train_model(config):
             decoder_mask = batch['decoder_mask'].to(device) # (B, 1, Seq_Len, Seq_Len)
 
             # Run the tensors through the transformer
-            encoder_output = model.encode(encoder_input, encoder_mask) # (B, Seq_Len, d_model)
-            decoder_output = model.decode(encoder_output, encoder_mask, decoder_input, decoder_mask) # (B, Seq_Len, d_model)
-            proj_output = model.project(decoder_output) # (B, Seq_Len, tgt_vocab_size)
+            proj_output = model(encoder_input, encoder_mask, decoder_input, decoder_mask) # (B, Seq_Len, tgt_vocab_size)
 
             label = batch['label'].to(device) # (B, Seq_Len)
 
@@ -197,17 +200,29 @@ def train_model(config):
 
             global_step += 1
 
+            # Periodic mid-epoch checkpoint so a disconnect doesn't lose the whole epoch
+            if global_step % config['checkpoint_every_steps'] == 0:
+                latest_filename = get_weights_file_path(config, "latest")
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': raw_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'global_step': global_step,
+                    'epoch_complete': False
+                }, latest_filename)
+
          # Run validation at the end of every epoch
-        run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
+        run_validation(raw_model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
 
 
         # Save the model at the end of every epoch
         model_filename = get_weights_file_path(config, f"{epoch:02d}")
         torch.save({
             'epoch': epoch,
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': raw_model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'global_step': global_step
+            'global_step': global_step,
+            'epoch_complete': True
         }, model_filename)
 
 if __name__ == "__main__":

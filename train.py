@@ -38,7 +38,7 @@ def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_
         decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
 
         # Calculate the output of the decoder
-        out = model.encode(encoder_output, source_mask, decoder_input, decoder_mask)
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
 
         # Get the next token
         prob = model.project(out[:, -1])
@@ -68,8 +68,8 @@ def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, 
 
             model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
 
-            source_text = batch['source_text'][0]
-            target_text = batch['target_text'][0]
+            source_text = batch['src_text'][0]
+            target_text = batch['tgt_text'][0]
             model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
 
             # Print to the console
@@ -196,7 +196,7 @@ def train_model(config):
             optimizer.zero_grad()
 
             global_step += 1
-            
+
          # Run validation at the end of every epoch
         run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
 

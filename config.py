@@ -14,7 +14,8 @@ def get_config():
         "preload": None,
         "tokenizer_file": "tokenizer_{0}.json",
         "experiment_name": "runs/tmodel",
-        "checkpoint_every_steps": 300
+        "checkpoint_every_steps": 300,
+        "keep_last_n_checkpoints": 2
     }
 
 def get_weights_file_path(config, epoch: str):

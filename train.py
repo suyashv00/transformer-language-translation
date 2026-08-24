@@ -238,6 +238,15 @@ def train_model(config):
             'epoch_complete': True
         }, model_filename)
 
+        # Bound disk usage: drop old numbered checkpoints outside the retention window.
+        # Tradeoff: config['preload'] set to a specific old epoch outside this window
+        # will no longer resolve - only 'latest' and recent epochs stay preloadable.
+        old_epoch = epoch - config['keep_last_n_checkpoints']
+        if old_epoch >= 0:
+            old_filename = Path(get_weights_file_path(config, f"{old_epoch:02d}"))
+            if old_filename.exists():
+                old_filename.unlink()
+
 if __name__ == "__main__":
     warnings.filterwarnings('ignore')
     config = get_config()
